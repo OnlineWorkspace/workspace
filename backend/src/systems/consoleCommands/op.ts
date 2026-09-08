@@ -1,5 +1,4 @@
 import type {CommandModule} from "yargs";
-import type {Instance} from "../../index.ts";
 
 const command: CommandModule = {
   command: "make_operator <username>",
@@ -7,10 +6,9 @@ const command: CommandModule = {
   describe: "Grant a user administrator permissions",
   async handler(args) {
     const username = args.username as string;
-    const instance = (globalThis as unknown as { INSTANCE: Instance }).INSTANCE;
-    const log = instance.log.system
+    const log = INSTANCE.log.system
 
-    let user = await instance.sys.users.getUserByUsername(username);
+    const user = await INSTANCE.sys.users.getUserByUsername(username);
 
     if (!user) {
       log.error(`Invalid user '${log.emphasis(username)}'`);

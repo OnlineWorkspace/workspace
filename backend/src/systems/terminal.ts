@@ -1,11 +1,12 @@
 import readline from "node:readline/promises";
-import type { CliRenderer, RGBA } from "@opentui/core";
+import {BoxRenderable, Text, TextRenderable, type CliRenderer, type RGBA, hexToRgb, InputRenderable} from "@opentui/core";
 import chalk from "chalk";
-import type { Instance } from "../index.ts";
-import { LogMessageStyle, LogType } from "../log.ts";
+import type {Instance} from "../index.ts";
+import {LogMessageStyle, LogType} from "../log.ts";
 import System from "../system.ts";
-import { WorkspacesFeatureFlags } from "./configuration.ts";
-import { WorkspacesEvent } from "./events.ts";
+import {WorkspacesFeatureFlags} from "./configuration.ts";
+import {WorkspacesEvent} from "./events.ts";
+import createReactionaryValue from "../utils/reactionaryValue.js";
 
 const COMPACT_LOG_TYPE = false;
 
@@ -25,9 +26,105 @@ const MESSAGE_LEVEL_COLOR: [number, number, number] = [250, 163, 7];
 export default class TerminalUISystem extends System {
   private renderer!: CliRenderer;
   private readlineInterface!: readline.Interface;
+  private inputAvailable = false;
+  private pendingPrompt?: (answer: string) => void;
+  private promptContainer!: BoxRenderable;
 
   constructor(instance: Instance) {
     super("terminal_ui", instance);
+  }
+
+  async prompt(
+    query: string,
+    options?: {
+      presetInputs: string[];
+      allowAlternativeInputs:
+        | { type: "string"; maxLength?: number; minLength?: number }
+        | { type: "number"; min?: number; max?: number; allowDecimals?: boolean };
+    },
+  ): Promise<string | undefined> {
+    if (!this.inputAvailable || this.pendingPrompt) {
+      this.log.error("Cannot create a prompt when another prompt is on-going.");
+
+      return undefined;
+    }
+
+    const self = this;
+
+    if (this.instance.sys.configuration.hasFeature(WorkspacesFeatureFlags.ExperimentalTerminalGui)) {
+      return new Promise<string | undefined>((resolve) => {
+        let currentResponse: string = "";
+        let currentResponseIdx = createReactionaryValue<number>(0);
+        const content = new BoxRenderable(this.renderer, {
+          focusable: true,
+          flexDirection: "row", gap: 1, onKeyDown(key) {
+            if (key.name === "up") {
+              // if (currentResponseIdx > (options?.presetInputs || []).length) {
+              //   currentResponseIdx = 0;
+              // } else {
+              //   currentResponseIdx++
+              // }
+            }
+          }
+        });
+        const promptText = new TextRenderable(this.renderer, {content: query});
+        const promptColon = new TextRenderable(this.renderer, {content: ":"});
+        const presetInputContainer = new BoxRenderable(this.renderer, {flexDirection: "column"});
+
+        if (options?.presetInputs) {
+          for (let presetIdx = 0; presetIdx < options.presetInputs.length; presetIdx = 0) {
+            const presetValue = options.presetInputs[presetIdx];
+            const guiPreset = new TextRenderable(this.renderer, {content: presetValue})
+            presetInputContainer.add(guiPreset)
+
+            currentResponseIdx.on((val) => {
+              if (val === presetIdx) {
+                guiPreset.bg = "#aaaf"
+              } else {
+                guiPreset.bg = "#000f"
+              }
+            })
+          }
+        }
+
+        if (options?.allowAlternativeInputs) {
+          const alternativeInput = new InputRenderable(this.renderer, {
+            onSubmit() {
+              resolve(alternativeInput.value)
+            }
+          })
+
+          presetInputContainer.add(alternativeInput);
+        }
+
+        content.add(promptText);
+        content.add(promptColon);
+        content.add(presetInputContainer);
+        this.promptContainer.add(content);
+      });
+    } else {
+      this.instance.log.system.info(query);
+
+      const answer = await new Promise<string>((resolve) => {
+        this.pendingPrompt = resolve;
+      });
+
+      return answer.trim();
+    }
+  }
+
+  /**
+   Feed a submitted input line through any active {@link prompt}.
+   @returns `true` if the line was consumed as a prompt answer
+   */
+  private resolvePendingPrompt(line: string): boolean {
+    if (!this.pendingPrompt) return false;
+
+    const resolve = this.pendingPrompt;
+    this.pendingPrompt = undefined;
+    resolve(line);
+
+    return true;
   }
 
   override async startup(): Promise<boolean> {
@@ -39,22 +136,12 @@ export default class TerminalUISystem extends System {
       this.stop();
     });
 
-    if (
-      this.instance.sys.configuration.hasFeature(
-        WorkspacesFeatureFlags.ClearTerminalConsoleOnStartup,
-      )
-    ) {
+    if (this.instance.sys.configuration.hasFeature(WorkspacesFeatureFlags.ClearTerminalConsoleOnStartup)) {
       console.clear();
     }
 
-    if (
-      !this.instance.sys.configuration.hasFeature(
-        WorkspacesFeatureFlags.ExperimentalTerminalGui,
-      )
-    ) {
-      function addLogMessage(
-        log: { type: LogType; level: string; message: string },
-      ) {
+    if (!this.instance.sys.configuration.hasFeature(WorkspacesFeatureFlags.ExperimentalTerminalGui)) {
+      function addLogMessage(log: { type: LogType; level: string; message: string }) {
         let consoleLogOutput: string = "";
         const currentTypeColor = MESSAGE_TYPE_COLORS[log.type];
 
@@ -84,16 +171,12 @@ export default class TerminalUISystem extends System {
           consoleLogOutput += chalk.rgb(...currentTypeColor)(`${typeString} `);
         }
 
-        consoleLogOutput += chalk.rgb(...MESSAGE_LEVEL_COLOR)(
-          `${log.level.padEnd(16)} `,
-        );
+        consoleLogOutput += chalk.rgb(...MESSAGE_LEVEL_COLOR)(`${log.level.padEnd(16)} `);
 
         const styledSegments = log.message.split("%");
         let currentMessageStyle: LogMessageStyle = LogMessageStyle.NORMAL;
         let customColorDef: [number, number, number] | undefined;
-        for (
-          let segmentIdx = 0; segmentIdx < styledSegments.length; segmentIdx++
-        ) {
+        for (let segmentIdx = 0; segmentIdx < styledSegments.length; segmentIdx++) {
           const segmentContent = styledSegments[segmentIdx];
 
           if (segmentContent === "") continue;
@@ -113,15 +196,10 @@ export default class TerminalUISystem extends System {
             }
             case LogMessageStyle.END_CUSTOM: {
               currentMessageStyle = LogMessageStyle.END_CUSTOM;
-              const colorValSegments = styledSegments[segmentIdx - 1].split(",")
-                .map((val) => Number(val));
+              const colorValSegments = styledSegments[segmentIdx - 1].split(",").map((val) => Number(val));
 
               if (colorValSegments.length === 4) {
-                customColorDef = [
-                  colorValSegments[0],
-                  colorValSegments[1],
-                  colorValSegments[2],
-                ];
+                customColorDef = [colorValSegments[0], colorValSegments[1], colorValSegments[2]];
               }
 
               continue;
@@ -137,19 +215,13 @@ export default class TerminalUISystem extends System {
               consoleLogOutput += chalk.rgb(...TEXT_COLOR)(segmentContent);
               break;
             case LogMessageStyle.EMPHASIZED:
-              consoleLogOutput += chalk.rgb(...EMPHASIZED_TEXT_COLOR)(
-                segmentContent,
-              );
+              consoleLogOutput += chalk.rgb(...EMPHASIZED_TEXT_COLOR)(segmentContent);
               break;
             case LogMessageStyle.END_CUSTOM:
               if (!customColorDef) {
-                consoleLogOutput += chalk.bold.red(
-                  `UNABLE TO PARSE CUSTOM COLOR '${customColorDef}'`,
-                );
+                consoleLogOutput += chalk.bold.red(`UNABLE TO PARSE CUSTOM COLOR '${customColorDef}'`);
               } else {
-                consoleLogOutput += chalk.rgb(...customColorDef)(
-                  segmentContent,
-                );
+                consoleLogOutput += chalk.rgb(...customColorDef)(segmentContent);
               }
               break;
           }
@@ -166,13 +238,13 @@ export default class TerminalUISystem extends System {
         addLogMessage(message);
       });
 
-      this.readlineInterface = readline.createInterface(
-        process.stdin,
-        process.stdout,
-      );
+      this.readlineInterface = readline.createInterface(process.stdin, process.stdout);
+
+      this.inputAvailable = true;
 
       // @ts-ignore
-      this.readlineInterface.addListener("line", (data) => {
+      this.readlineInterface.addListener("line", (data: string) => {
+        if (this.resolvePendingPrompt(data)) return;
         this.instance.sys.consoleCommands.executeCommandFromString(data);
       });
 
@@ -189,17 +261,10 @@ export default class TerminalUISystem extends System {
       return true;
     }
 
-    const {
-      BoxRenderable,
-      ConsolePosition,
-      createCliRenderer,
-      InputRenderable,
-      RGBA,
-      ScrollBoxRenderable,
-      TextRenderable,
-    } = await import("@opentui/core");
+    const {BoxRenderable, ConsolePosition, createCliRenderer, InputRenderable, RGBA, ScrollBoxRenderable, TextRenderable} = await import("@opentui/core");
 
     const self = this;
+
     function toRGBA(colorArray: [number, number, number]): RGBA {
       return RGBA.fromInts(...colorArray, 255);
     }
@@ -236,9 +301,7 @@ export default class TerminalUISystem extends System {
       stickyStart: "bottom",
     });
 
-    function addLogMessage(
-      log: { type: LogType; level: string; message: string },
-    ) {
+    function addLogMessage(log: { type: LogType; level: string; message: string }) {
       const logEntry = new BoxRenderable(self.renderer, {
         flexDirection: "row",
         flexWrap: "no-wrap",
@@ -303,9 +366,7 @@ export default class TerminalUISystem extends System {
       const styledSegments = log.message.split("%");
       let currentMessageStyle: LogMessageStyle = LogMessageStyle.NORMAL;
       let customColorDef: RGBA | undefined;
-      for (
-        let segmentIdx = 0; segmentIdx < styledSegments.length; segmentIdx++
-      ) {
+      for (let segmentIdx = 0; segmentIdx < styledSegments.length; segmentIdx++) {
         const segmentContent = styledSegments[segmentIdx];
 
         if (segmentContent === "") continue;
@@ -325,16 +386,10 @@ export default class TerminalUISystem extends System {
           }
           case LogMessageStyle.END_CUSTOM: {
             currentMessageStyle = LogMessageStyle.END_CUSTOM;
-            const colorValSegments = styledSegments[segmentIdx - 1].split(",")
-              .map((val) => Number(val));
+            const colorValSegments = styledSegments[segmentIdx - 1].split(",").map((val) => Number(val));
 
             if (colorValSegments.length === 4) {
-              customColorDef = RGBA.fromInts(
-                colorValSegments[0],
-                colorValSegments[1],
-                colorValSegments[2],
-                colorValSegments[3],
-              );
+              customColorDef = RGBA.fromInts(colorValSegments[0], colorValSegments[1], colorValSegments[2], colorValSegments[3]);
             }
 
             continue;
@@ -415,10 +470,13 @@ export default class TerminalUISystem extends System {
       onKeyDown(e) {
         if (e.name === "return") {
           const trimmedContent = commandInput.plainText.trim();
+          if (self.resolvePendingPrompt(trimmedContent)) {
+            commandInput.value = "";
+            commandInput.requestRender();
+            return;
+          }
           if (!trimmedContent) return;
-          self.instance.sys.consoleCommands.executeCommandFromString(
-            trimmedContent,
-          );
+          self.instance.sys.consoleCommands.executeCommandFromString(trimmedContent);
           commandInput.value = "";
         }
         commandInput.requestRender();
@@ -426,6 +484,11 @@ export default class TerminalUISystem extends System {
     });
     commandInput.focus();
     commandInputContainer.add(commandInput);
+
+    self.inputAvailable = true;
+
+    self.promptContainer = new BoxRenderable(self.renderer, {border: false, flexDirection: "column"});
+    self.renderer.root.add(self.promptContainer);
 
     return true;
   }

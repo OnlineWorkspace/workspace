@@ -1,11 +1,10 @@
 import type {CommandModule} from "yargs";
-import type {Instance} from "../../index.ts";
 
 const command: CommandModule = {
   command: "applications",
   aliases: ["apps"],
   describe: "List installed applications",
-  async handler(args) {
+  async handler() {
     const log = INSTANCE.log.system
 
     for (const app of INSTANCE.sys.applications.availableApplications) {
