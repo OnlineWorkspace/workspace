@@ -35,6 +35,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 fs/
 node_modules/
-autoinstall/
+auto_install/
 
 caddy.exe
