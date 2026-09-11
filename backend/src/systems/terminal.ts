@@ -136,7 +136,10 @@ export default class TerminalUISystem extends System {
       this.stop();
     });
 
-    if (this.instance.sys.configuration.hasFeature(WorkspacesFeatureFlags.ClearTerminalConsoleOnStartup)) {
+    if (
+      this.instance.sys.configuration.hasFeature(WorkspacesFeatureFlags.ExperimentalTerminalGui) ||
+      this.instance.sys.configuration.hasFeature(WorkspacesFeatureFlags.ClearTerminalConsoleOnStartup)
+    ) {
       console.clear();
     }
 
